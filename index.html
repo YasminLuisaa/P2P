@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!-- Define o tipo de documento como HTML5 e especifica o idioma como inglês -->
+    <meta charset="UTF-8">
+    <!-- Define o viewport para dispositivos móveis, tornando o layout responsivo -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Define o título da página -->
+    <title>WebRTC P2P Chat</title>
+    <style>
+        /* Define estilos para a página */
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        #chatbox { width: 100%; height: 300px; border: 1px solid #ccc; overflow-y: auto; padding: 10px; margin-bottom: 10px; }
+        #message { width: 80%; padding: 10px; }
+        #send { padding: 10px; }
+    </style>
+</head>
+<body>
+    <!-- Título da página exibido ao usuário -->
+    <h1>Peer-to-Peer WebRTC Chat</h1>
+    
+    <!-- Caixa de chat onde as mensagens serão exibidas -->
+    <div id="chatbox"></div>
+    
+    <!-- Campo de entrada para a mensagem -->
+    <input type="text" id="message" placeholder="Type a message..." autofocus>
+    
+    <!-- Botão para enviar a mensagem -->
+    <button id="send">Send</button>
+
+    <script>
+        // Obtem elementos da interface do usuário
+        const chatbox = document.getElementById('chatbox');
+        const messageInput = document.getElementById('message');
+        const sendButton = document.getElementById('send');
+
+        // WebSocket para sinalização (utilizado para trocar informações de conexão entre peers)
+        const signalingSocket = new WebSocket('ws://localhost:6789');
+
+        // Configura uma nova conexão RTCPeerConnection para WebRTC
+        const peerConnection = new RTCPeerConnection({
+            // Servidor STUN utilizado para descobrir o IP público do peer
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
+
+        // Variável que armazenará o canal de dados para comunicação P2P
+        let dataChannel;
+
+        // Evento disparado quando a conexão WebSocket é estabelecida
+        signalingSocket.onopen = () => console.log("Signaling WebSocket connected.");
+        
+        // Evento disparado em caso de erro na conexão WebSocket
+        signalingSocket.onerror = (error) => console.error("Signaling WebSocket error:", error);
+
+        // Evento que lida com a recepção de um canal de dados do peer
+        peerConnection.ondatachannel = event => {
+            console.log("Data channel received.");
+            const receiveChannel = event.channel;
+            // Define o comportamento ao receber uma mensagem no canal de dados
+            receiveChannel.onmessage = event => {
+                console.log("Message received via WebRTC:", event.data);
+                const message = document.createElement('p');
+                message.textContent = event.data; // Exibe a mensagem recebida no chatbox
+                chatbox.appendChild(message);
+                chatbox.scrollTop = chatbox.scrollHeight; // Auto-scroll até o fim do chat
+            };
+        };
+
+        // Evento disparado quando um candidato ICE é gerado para descoberta de rota
+        peerConnection.onicecandidate = event => {
+            if (event.candidate) {
+                console.log("Sending ICE candidate:", event.candidate);
+                // Envia o candidato ICE via WebSocket para o outro peer
+                signalingSocket.send(JSON.stringify({ candidate: event.candidate }));
+            }
+        };
+
+        // Evento para lidar com mensagens recebidas via WebSocket
+        signalingSocket.onmessage = async event => {
+            // Verifica se a mensagem recebida é um Blob (binária)
+            if (event.data instanceof Blob) {
+                event.data.text().then(text => {
+                    console.log("Signaling message received (Blob):", text);
+                    const data = JSON.parse(text);
+                    handleSignalingData(data); // Trata os dados de sinalização
+                }).catch(error => console.error("Error processing Blob:", error));
+            } else {
+                console.log("Signaling message received:", event.data);
+                const data = JSON.parse(event.data);
+                handleSignalingData(data); // Trata os dados de sinalização
+            }
+        };
+
+        // Função para processar as mensagens de sinalização
+        function handleSignalingData(data) {
+            if (data.offer) {
+                // Se for uma oferta, cria uma resposta (answer)
+                console.log("Received offer, creating answer.");
+                peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer))
+                    .then(() => peerConnection.createAnswer()) // Cria a resposta
+                    .then(answer => peerConnection.setLocalDescription(answer)) // Define a descrição local
+                    .then(() => signalingSocket.send(JSON.stringify({ answer: peerConnection.localDescription }))) // Envia a resposta via WebSocket
+                    .catch(console.error);
+            } else if (data.answer) {
+                // Se for uma resposta, aplica a descrição remota
+                console.log("Received answer, applying.");
+                peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer)).catch(console.error);
+            } else if (data.candidate) {
+                // Se for um candidato ICE, adiciona-o à conexão
+                console.log("Adding ICE candidate:", data.candidate);
+                peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate)).catch(console.error);
+            }
+        }
+
+        // Função para criar e enviar uma oferta de conexão WebRTC
+        async function createOffer() {
+            // Cria um canal de dados para troca de mensagens
+            dataChannel = peerConnection.createDataChannel("chat");
+            console.log("Data channel created.");
+
+            // Eventos para abertura e fechamento do canal de dados
+            dataChannel.onopen = () => console.log("Data channel opened.");
+            dataChannel.onclose = () => console.log("Data channel closed.");
+            
+            // Evento para receber mensagens via o canal de dados
+            dataChannel.onmessage = event => {
+                console.log("Message received on data channel:", event.data);
+                const message = document.createElement('p');
+                message.textContent = event.data; // Exibe a mensagem recebida
+                chatbox.appendChild(message);
+                chatbox.scrollTop = chatbox.scrollHeight; // Auto-scroll até o fim do chat
+            };
+
+            // Cria e envia uma oferta para iniciar a conexão P2P
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            console.log("Offer created and sent.");
+            signalingSocket.send(JSON.stringify({ offer: offer })); // Envia a oferta via WebSocket
+        }
+
+        // Função que é chamada ao clicar no botão "Send"
+        sendButton.onclick = () => {
+            const message = messageInput.value; // Obtém o texto da mensagem
+            if (message && dataChannel && dataChannel.readyState === "open") {
+                console.log("Sending message via WebRTC:", message);
+                // Mostra a mensagem imediatamente no chat local
+                const myMessage = document.createElement('p');
+                myMessage.textContent = "You: " + message;
+                chatbox.appendChild(myMessage);
+                chatbox.scrollTop = chatbox.scrollHeight;
+
+                // Envia a mensagem para o peer através do canal de dados
+                dataChannel.send(message);
+                messageInput.value = ''; // Limpa o campo de mensagem
+            } else {
+                console.log("Data channel is not ready to send messages."); // Alerta se o canal de dados não estiver pronto
+            }
+        };
+
+        // Inicia a conexão WebRTC e cria uma oferta ao carregar a página
+        createOffer();
+    </script>
+</body>
+</html>
